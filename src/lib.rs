@@ -119,7 +119,8 @@ pub trait Streaming: StreamingIterator+Sized {
     ///
     /// see [`Streaming::map_ref_and`].
     ///
-    /// If we map to another streaming iterator (if you `impl StreamingIterator for MutRefAnd<'_,_,(your type)>`), [`StreamingIteratorMut::flatten`] works correctly.
+    /// If we map to another streaming iterator (if you `impl StreamingIterator for MutRefAnd<'_,_,YourType>`), [`StreamingIteratorMut::flatten`] works correctly.
+    /// In order to do so, implement [`StreamingIteratorPart`]`<'_,_,YourType>` and or [`StreamingIteratorMutPart`]<.> for `YourType`
     fn map_mut_and<F,R,T>(self, f: F) -> MapMutRefAnd<Self,F,R,T>
     where F: for<'a> FnMut(&'a mut Self::Item) -> MutRefAnd<'a,R,T> {
 	MapMutRefAnd {it: self, f, inner: None}
@@ -300,7 +301,9 @@ where I: StreamingIteratorMut, J: StreamingIteratorMut {
 }
 /// A struct encapsulating a reference and another object.
 ///
-/// see [`Streaming::map_ref_and`]
+/// see [`Streaming::map_ref_and`].
+/// If you want to implement [`StreamingIterator`] or [`StreamingIteratorMut`] for `RefAnd<'_,_,YourType>`,
+/// take a look at implementing [`StreamingIteratorPart`] and [`StreamingIteratorMutPart`] for `YourType`
 #[derive(Debug)]
 pub struct RefAnd<'a,R,T> {r: &'a R, other: T}
 impl<'a,R:'static,T> RefAnd<'a,R,T> {
@@ -352,6 +355,8 @@ where I: StreamingIterator+Clone, T: Clone,
 /// A struct encapsulating a mutable reference and another object.
 ///
 /// see [`Streaming::map_mut_and`]
+/// If you want to implement [`StreamingIterator`] or [`StreamingIteratorMut`] for `MutRefAnd<'_,_,YourType>`,
+/// take a look at implementing [`StreamingIteratorPart`] and [`StreamingIteratorMutPart`] for `YourType`
 #[derive(Debug)]
 pub struct MutRefAnd<'a,R,T> {r: &'a mut R, other: T}
 impl<'a,R:'static,T> MutRefAnd<'a,R,T> {
@@ -412,36 +417,7 @@ where I: StreamingIteratorMut+Clone, T: Clone,
 	Self {it,f,inner}
     }
 }
-/// Part of an iterator adapter to iterate over all possible pairs from two iterators.
-///
-/// see [`Streaming::combinations_with`]
-#[derive(Debug,Clone)]
-pub struct Combinations<J,F> {j: J, f: F}
-impl<'a,I,J,F> StreamingIterator for MutRefAnd<'a,I,Combinations<J,F>>
-where I: StreamingIterator, J: StreamingIterator, F: FnMut() -> J {
-    type Item = Self;
-    #[inline]fn advance(&mut self) {
-	self.other.j.advance();
-	if !(self.other.j.is_done()) {return}
-	self.r.advance();
-	self.other.j = (self.other.f)();
-	self.other.j.advance();
-    }
-    #[inline]fn get(&self) -> Option<&Self::Item> {
-	(!(self.is_done())).then_some(self)
-    }
-    #[inline]fn is_done(&self) -> bool {
-	self.r.is_done() || self.other.j.is_done()
-    }
-}
-impl<'a,I,J,F> MutRefAnd<'a,I,Combinations<J,F>>
-where I: StreamingIterator, J: StreamingIterator {
-    /// The methods `get()` and `next()` on the iterator returned from [`Streaming::combinations_with`]
-    /// return this, to retrieve actual value pairs call `unwrap_full`.
-    #[inline]pub fn unwrap_full<'b>(&'b self) -> (&'b I::Item, &'b J::Item) {
-	(self.r.get().unwrap(),self.other.j.get().unwrap())
-    }
-}
+
 /// A version of [`streaming_iterator::Filter`] that derives [`Clone`].
 ///
 /// see [`Streaming::cfilter`]
@@ -583,4 +559,120 @@ impl<T> Stack for Vec<T> {
     fn get_mut(&mut self) -> Option<&mut T> {self.last_mut()}
     fn is_empty(&self) -> bool {self.is_empty()}
 }
+/// A workaround trait for you to be able to implement [`StreamingIterator`] for `RefAnd<'.,.,Self>` and `MutRefAnd<'.,.,Self>`.
+pub trait StreamingIteratorPart<I>: Sized {
+    /// [`StreamingIterator::Item`]
+    type Item;
+    /// [`StreamingIterator::advance`]
+    fn advance(this: &mut I);
+    /// [`StreamingIterator::get`]
+    fn get(this: &I) -> Option<&Self::Item>;
+    /// [`StreamingIterator::is_done`] if you want to overwrite it
+    #[inline]fn is_done(this: &I) -> bool {Self::get(this).is_none()}
+    /// [`StreamingIterator::fold`] if you want to overwrite it
+    #[inline]fn fold<Acc,F>(mut this: I, init: Acc, mut f: F) -> Acc 
+    where F: FnMut(Acc, &Self::Item) -> Acc {
+        let mut acc = init;
+        while let Some(item) = Self::next(&mut this) {
+            acc = f(acc,item);
+        }
+        acc
+    }
+    /// [`StreamingIterator::size_hint`] if you want to overwrite it
+    #[inline]fn size_hint(_this: &I) -> (usize, Option<usize>) {(0,None)}
+    /// [`StreamingIterator::count`] if you want to overwrite it
+    #[inline]fn count(this: I) -> usize {Self::fold(this, 0, |count,_| count+1)}
+    /// [`StreamingIterator::next`] if you want to overwrite it
+    #[inline]fn next(this: &mut I) -> Option<&Self::Item> {
+        Self::advance(this);
+        Self::get(this)
+    }
+}
+impl<'a,R,T> StreamingIterator for RefAnd<'a,R,T> 
+where T: StreamingIteratorPart<RefAnd<'a,R,T>> {
+    type Item = T::Item;
+    #[inline]fn advance(&mut self) {T::advance(self);}
+    #[inline]fn get(&self) -> Option<&Self::Item> {T::get(self)}
+    #[inline]fn is_done(&self) -> bool {T::is_done(self)}
+    #[inline]fn fold<Acc,F>(self, init: Acc, f: F) -> Acc
+    where F: FnMut(Acc, &Self::Item) -> Acc {T::fold(self,init,f)}
+    #[inline]fn size_hint(&self) -> (usize,Option<usize>) {T::size_hint(self)}
+    #[inline]fn count(self) -> usize {T::count(self)}
+    #[inline]fn next(&mut self) -> Option<&Self::Item> {T::next(self)}
+}
+impl<'a,R,T> StreamingIterator for MutRefAnd<'a,R,T> 
+where T: StreamingIteratorPart<MutRefAnd<'a,R,T>> {
+    type Item = T::Item;
+    #[inline]fn advance(&mut self) {T::advance(self);}
+    #[inline]fn get(&self) -> Option<&Self::Item> {T::get(self)}
+    #[inline]fn is_done(&self) -> bool {T::is_done(self)}
+    #[inline]fn fold<Acc,F>(self, init: Acc, f: F) -> Acc
+    where F: FnMut(Acc, &Self::Item) -> Acc {T::fold(self,init,f)}
+    #[inline]fn size_hint(&self) -> (usize,Option<usize>) {T::size_hint(self)}
+    #[inline]fn count(self) -> usize {T::count(self)}
+    #[inline]fn next(&mut self) -> Option<&Self::Item> {T::next(self)}
+}
+/// A workaround for you to be able to implement [`StreamingIteratorMut`] for `RefAnd<'.,.,Self>` and `MutRefAnd<'.,.,Self>`.
+pub trait StreamingIteratorMutPart<I>: StreamingIteratorPart<I> {
+    /// [`StreamingIteratorMut::get_mut`] 
+    fn get_mut(this: &mut I) -> Option<&mut Self::Item>;
+    /// [`StreamingIteratorMut::next_mut`] if you want to overwrite it
+    #[inline]fn next_mut(this: &mut I) -> Option<&mut Self::Item> {
+        Self::advance(this);
+        Self::get_mut(this)
+    }
+    /// [`StreamingIteratorMut::fold_mut`] if you want to overwrite it
+    #[inline]fn fold_mut<Acc,F>(mut this: I, init: Acc, mut f: F) -> Acc 
+    where F: FnMut(Acc,&mut Self::Item) -> Acc {
+        let mut acc = init;
+        while let Some(item) = Self::next_mut(&mut this) {
+            acc = f(acc,item);
+        }
+        acc
+    }
+}
+impl<'a,R,T> StreamingIteratorMut for RefAnd<'a,R,T>
+where T: StreamingIteratorMutPart<RefAnd<'a,R,T>> {
+    #[inline]fn get_mut(&mut self) -> Option<&mut Self::Item> {T::get_mut(self)}
+    #[inline]fn next_mut(&mut self) -> Option<&mut Self::Item> {T::next_mut(self)}
+    #[inline]fn fold_mut<Acc,F>(self, init: Acc,f: F) -> Acc
+    where F: FnMut(Acc, &mut Self::Item) -> Acc {T::fold_mut(self,init,f)}
+}
+impl<'a,R,T> StreamingIteratorMut for MutRefAnd<'a,R,T>
+where T: StreamingIteratorMutPart<MutRefAnd<'a,R,T>> {
+    #[inline]fn get_mut(&mut self) -> Option<&mut Self::Item> {T::get_mut(self)}
+    #[inline]fn next_mut(&mut self) -> Option<&mut Self::Item> {T::next_mut(self)}
+    #[inline]fn fold_mut<Acc,F>(self, init: Acc,f: F) -> Acc
+    where F: FnMut(Acc, &mut Self::Item) -> Acc {T::fold_mut(self,init,f)}
+}
 
+/// Part of an iterator adapter to iterate over all possible pairs from two iterators.
+///
+/// see [`Streaming::combinations_with`]
+#[derive(Debug,Clone)]
+pub struct Combinations<J,F> {j: J, f: F}
+impl<'a,I,J,F> StreamingIteratorPart<MutRefAnd<'a,I,Self>> for Combinations<J,F>
+where I: StreamingIterator, J: StreamingIterator, F: FnMut() -> J {
+    type Item = MutRefAnd<'a,I,Self>;
+    #[inline]fn advance(this: &mut MutRefAnd<'a,I,Self>) {
+	    this.other.j.advance();
+	    if !(this.other.j.is_done()) {return}
+	    this.r.advance();
+	    this.other.j = (this.other.f)();
+	    this.other.j.advance();
+    }
+    #[inline]fn get<'b>(this: &'b MutRefAnd<'a,I,Self>) -> Option<&'b Self::Item> {
+	    (!(this.is_done())).then_some(this)
+    }
+    #[inline]fn is_done(this: &MutRefAnd<'a,I,Self>) -> bool {
+	    this.r.is_done() || this.other.j.is_done()
+    }
+}
+impl<'a,I,J,F> MutRefAnd<'a,I,Combinations<J,F>>
+where I: StreamingIterator, J: StreamingIterator {
+    /// The methods `get()` and `next()` on the iterator returned from [`Streaming::combinations_with`]
+    /// return this, to retrieve actual value pairs call `unwrap_full`.
+    #[inline]pub fn unwrap_full<'b>(&'b self) -> (&'b I::Item, &'b J::Item) {
+	(self.r.get().unwrap(),self.other.j.get().unwrap())
+    }
+}
