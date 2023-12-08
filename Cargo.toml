@@ -2,6 +2,11 @@
 name = "packed_streaming_iterator"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+description = "Additions to streaming_iterator"
+homepage = "https://github.com/paihei1/packed_streaming_iterator"
+repository = "https://github.com/paihei1/packed_streaming_iterator"
+readme = "README.md"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
