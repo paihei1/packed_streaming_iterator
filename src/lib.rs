@@ -222,6 +222,12 @@ pub trait Streaming: StreamingIterator+Sized {
     where J: StreamingIterator, F: FnMut(&Self::Item) -> J {
 	CFlatMap {it: self, f, j: None}
     }
+    /// A copy of [`StreamingIteratorMut::flatten`] that implements [`Clone`]. 
+    /// Note that only Self needs to be cloneable, not `Self::Item`
+    fn cflatten(self) -> CFlatten<Self> 
+    where Self: StreamingIteratorMut, Self::Item:StreamingIterator {
+        CFlatten {iter: self, first: true}
+    }
 }
 
 /// Enumerating adapter for streaming iterators
@@ -318,6 +324,10 @@ impl<'a,R:'static,T> RefAnd<'a,R,T> {
     #[inline]pub fn unwrap<'b>(&'b self) -> (&'b R, &'b T) {
 	(self.r,&self.other)
     }
+    /// `unwrap_mut` to change the `T` inside.
+    #[inline]pub fn unwrap_mut<'b>(&'b mut self) -> (&'b R, &'b mut T) {
+        (self.r, &mut self.other)
+    }
 }
 /// Iterator adapter to map to a combination of a reference into the original Iterator and also a new object.
 ///
@@ -338,12 +348,18 @@ where I: StreamingIterator, F: for<'a> FnMut(&'a I::Item) -> RefAnd<'a,R,T> {
 	self.inner.as_ref()
     }
 }
+impl<I,F,R: 'static,T> StreamingIteratorMut for MapRefAnd<I,F,R,T> 
+where I: StreamingIterator, F: for<'a> FnMut(&'a I::Item) -> RefAnd<'a,R,T> {
+    #[inline]fn get_mut(&mut self) -> Option<&mut Self::Item> {
+        self.inner.as_mut()
+    }
+}
 impl<I,F,R,T> Clone for MapRefAnd<I,F,R,T>
 where I: StreamingIterator+Clone, T: Clone,
-      F: Clone+for<'a> Fn(&'a I::Item) -> RefAnd<'a,R,T>, {
+      F: Clone+for<'a> FnMut(&'a I::Item) -> RefAnd<'a,R,T>, {
     fn clone(&self) -> Self {
 	let it = self.it.clone();
-	let f = self.f.clone();
+	let mut f = self.f.clone();
 	let inner = if let Some(ref inner) = self.inner {
 	    Some(RefAnd{r: unsafe {f(it.get().unwrap()).to_static()}.r,
 			other: inner.other.clone()})
@@ -477,6 +493,44 @@ where I: StreamingIterator, F: FnMut(&I::Item) -> J, J: StreamingIterator {
     }
     #[inline]fn get(&self) -> Option<&Self::Item> {
         self.j.as_ref().and_then(J::get)
+    }
+}
+
+/// A version of [`streaming_iterator::Flatten`] that derives [`Clone`]. 
+/// note that only the outer iterator has to be cloneable, e.g. [`MapRefAnd`] and [`MapMutRefAnd`]
+/// which implement [`Clone`] without [`RefAnd`] and [`MutRefAnd`] doing so. 
+/// 
+/// see [`Streaming::cflatten`]
+#[derive(Debug, Clone)]
+pub struct CFlatten<I> {iter: I, first: bool}
+impl<I> StreamingIterator for CFlatten<I>
+where I: StreamingIteratorMut, I::Item: StreamingIterator {
+    type Item = <I::Item as StreamingIterator>::Item;
+    #[inline]fn advance(&mut self) {
+        if self.first {self.first = false;self.iter.advance();}
+        while let Some(iter) = self.iter.get_mut() {
+            iter.advance();
+            if !iter.is_done() {break}
+            self.iter.advance();
+        }
+    }
+    #[inline]fn is_done(&self) -> bool {
+        match self.iter.get() {Some(iter) => iter.is_done(), None => true}
+    }
+    #[inline]fn get(&self) -> Option<&Self::Item> {self.iter.get().and_then(I::Item::get)}
+    #[inline]fn fold<Acc,Fold>(self, init: Acc, mut fold: Fold) -> Acc
+    where Fold: FnMut(Acc, &Self::Item) -> Acc {
+        self.iter.fold_mut(init, |acc,item| item.fold(acc,&mut fold))
+    }
+}
+impl<I> StreamingIteratorMut for CFlatten<I>
+where I: StreamingIteratorMut,I::Item: StreamingIteratorMut {
+    #[inline]fn get_mut(&mut self) -> Option<&mut Self::Item> {
+        self.iter.get_mut().and_then(I::Item::get_mut)
+    }
+    #[inline]fn fold_mut<Acc,Fold>(self, init: Acc, mut fold: Fold) -> Acc 
+    where Fold: FnMut(Acc, &mut Self::Item) -> Acc {
+        self.iter.fold_mut(init, |acc,item| item.fold_mut(acc, &mut fold))
     }
 }
 
